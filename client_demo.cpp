@@ -98,7 +98,7 @@ EVP_PKEY* getPrivatekeyFromTPM(const std::string& TPM_Private_Key_Handle,
             if (TPMpkey)
             {
                 std::cerr
-                    << " >> Private key extracted from the TPM successfully\n";
+                    << " >> PKEY object extracted from the TPM successfully\n";
                 break;
             }
         }
@@ -375,42 +375,6 @@ void print_ssl_session_details(SSL* ssl)
 }
 
 /**
- * @brief Receives a file from the server and saves it to the specified output
- * path.
- *
- * @param ssl The SSL connection to use for receiving the file.
- * @param output_path The path where the received file will be saved.
- */
-void receive_file(SSL* ssl, const std::string& output_path)
-{
-    std::ofstream out_file(output_path, std::ios::binary);
-    if (!out_file.is_open())
-    {
-        std::cerr << "Failed to open file for writing: " << output_path
-                  << std::endl;
-        return;
-    }
-
-    std::cerr << "Receiving file from the server and saving to: " << output_path
-              << std::endl;
-    char buffer[1024];
-    int bytes;
-
-    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer))) > 0)
-    {
-        out_file.write(buffer, bytes);
-    }
-
-    out_file.close();
-    std::cerr << "File received and saved successfully" << std::endl;
-
-    // Send acknowledgment
-    const char* ack_message = "File received successfully!";
-    SSL_write(ssl, ack_message, strlen(ack_message));
-    std::cerr << " >> Sent acknowledgment to the server" << std::endl;
-}
-
-/**
  * @brief Creates a new SSL context for a TLS client.
  *
  * This function initializes and returns a new SSL context configured
@@ -514,7 +478,7 @@ void configure_ssl_context(SSL_CTX* ctx, const std::string& nvIndex,
         std::cerr << "Failed to load root CA certificate into SSL context." << std::endl;
     }
 
-    std::cout << "Certificates successfully written to " << cert_filename << std::endl;
+    //std::cout << "Certificates successfully written to " << cert_filename << std::endl;
     std::cerr << " >> CA certificates loaded successfully from " << ca_cert_path
               << std::endl;
 
@@ -580,6 +544,110 @@ int create_tcp_connection(const std::string& hostname, const std::string& port)
         std::cerr << "Failed to connect to the server" << std::endl;
     }
     return sockfd;
+}
+
+void send_file(SSL* ssl, const std::string& file_path)
+{
+    // Open the file
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open file: " << file_path << std::endl;
+        return;
+    }
+
+    // Get the file size
+    std::streamsize file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    // Send the file size to the server
+    uint32_t size_to_send = htonl(static_cast<uint32_t>(file_size)); // Convert to network byte order
+    if (SSL_write(ssl, &size_to_send, sizeof(size_to_send)) <= 0)
+    {
+        std::cerr << "Error sending file size: " << SSL_get_error(ssl, 0) << std::endl;
+        file.close();
+        return;
+    }
+
+    // Send the file contents
+    std::cerr << "Sending file: " << file_path << " (Size: " << file_size << " bytes)" << std::endl;
+    char buffer[1024];
+    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0)
+    {
+        int bytes_to_send = static_cast<int>(file.gcount());
+        int bytes_written = SSL_write(ssl, buffer, bytes_to_send);
+        if (bytes_written <= 0)
+        {
+            std::cerr << "Error sending file: " << SSL_get_error(ssl, bytes_written) << std::endl;
+            break;
+        }
+    }
+    file.close();
+    std::cerr << "File sent successfully: " << file_path << std::endl;
+}
+
+void receive_file(SSL* ssl, const std::string& output_path)
+{
+    std::ofstream out_file(output_path, std::ios::binary);
+    if (!out_file.is_open())
+    {
+        std::cerr << "Failed to open file for writing: " << output_path << std::endl;
+        return;
+    }
+
+    // Step 1: Receive the file size
+    uint32_t file_size_net;
+    if (SSL_read(ssl, &file_size_net, sizeof(file_size_net)) <= 0)
+    {
+        std::cerr << "Failed to read file size." << std::endl;
+        return;
+    }
+    uint32_t file_size = ntohl(file_size_net); // Convert from network byte order
+    std::cerr << "Receiving file of size: " << file_size << " bytes." << std::endl;
+
+    // Step 2: Receive the file contents
+    char buffer[1024];
+    std::streamsize bytes_received = 0;
+    while (bytes_received < file_size)
+    {
+        int bytes_to_read = std::min(static_cast<int>(sizeof(buffer)), static_cast<int>(file_size - bytes_received));
+        int bytes_read = SSL_read(ssl, buffer, bytes_to_read);
+        if (bytes_read <= 0)
+        {
+            std::cerr << "Error reading file data." << std::endl;
+            break;
+        }
+        out_file.write(buffer, bytes_read);
+        bytes_received += bytes_read;
+    }
+    out_file.close();
+    if (bytes_received == file_size)
+    {
+        std::cerr << "File received successfully: " << output_path << std::endl;
+    }
+    else
+    {
+        std::cerr << "File transfer incomplete." << std::endl;
+    }
+}
+
+// Client-side logic to coordinate bidirectional transfer
+void handle_server(SSL* ssl)
+{
+    // Step 1: Receive a file from the server
+    receive_file(ssl, "received_from_server.txt");
+
+    // Step 2: Send a file to the server
+    send_file(ssl, "client_to_server.txt");
+
+    // Step 3: Receive acknowledgment
+    char ack_buffer[1024];
+    int ack_bytes = SSL_read(ssl, ack_buffer, sizeof(ack_buffer) - 1);
+    if (ack_bytes > 0)
+    {
+        ack_buffer[ack_bytes] = '\0'; // Null-terminate the acknowledgment
+        std::cerr << "Acknowledgment from server: " << ack_buffer << std::endl;
+    }
 }
 
 
@@ -661,15 +729,8 @@ int main(int argc, char* argv[])
 
     print_ssl_session_details(ssl);
 
-    // Sample message to send to the server
-    const char* msg = "Hello, Secure Server!";
-    if (SSL_write(ssl, msg, strlen(msg)) <= 0)
-    {
-        std::cerr << "Error writing to the SSL connection\n";
-    }
-
     // Optionally, receive a file from the server
-    receive_file(ssl, "received_file.bin");
+    handle_server(ssl);
 
     // Cleanup
     SSL_free(ssl);

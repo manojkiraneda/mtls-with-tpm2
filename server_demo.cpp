@@ -203,7 +203,7 @@ EVP_PKEY* get_private_key_from_tpm(const std::string& tpm_handle,
             privateKey = OSSL_STORE_INFO_get1_PKEY(info);
             if (privateKey)
             {
-                std::cout << " >> Private Key Retrieved from TPM Successfully"
+                std::cout << " >> PKEY object Retrieved from TPM Successfully"
                           << std::endl;
                 break;
             }
@@ -261,7 +261,6 @@ X509* read_certificate_from_nv(const std::string& nv_handle,
     // Construct the handle string in the correct format
     std::string handle = "handle:" + nv_handle;
 
-    std::cerr << handle << std::endl;
     // Open the NV handle using OSSL_STORE API
     OSSL_STORE_CTX* store_ctx =
         OSSL_STORE_open_ex(handle.c_str(), libctx, "?provider=tpm2", nullptr,
@@ -291,7 +290,7 @@ X509* read_certificate_from_nv(const std::string& nv_handle,
             {
                 X509_up_ref(certificate);
                 std::cerr
-                    << " >> Certificate extracted successfully from NV handle."
+                    << " >> Certificate extracted successfully from NV handle:"
                     << nv_handle << std::endl;
                 printX509Certificate(certificate);
                 break;
@@ -627,7 +626,7 @@ void handshake_callback(int write_p, int version, int content_type,
             std::cerr << "Application data" << std::endl;
             break;
         default:
-            std::cerr << "Unknown content type: " << content_type << std::endl;
+            //std::cerr << "Unknown content type: " << content_type << std::endl;
             break;
     }
 
@@ -736,7 +735,7 @@ void configure_ssl_context(SSL_CTX* ctx, const std::string& nvIndex,
         std::cerr << "Failed to write certificates to file." << std::endl;
     }
 
-    std::cout << "Certificates successfully written to " << cert_filename << std::endl;
+    //std::cout << "Certificates successfully written to " << cert_filename << std::endl;
 
     if (SSL_CTX_load_verify_locations(ctx, cert_filename, nullptr) != 1) {
         std::cerr << "Failed to load root CA certificate into SSL context." << std::endl;
@@ -828,6 +827,104 @@ void print_ssl_session_details(SSL* ssl)
     std::cerr << "  Session Start Time: " << session_start_time << std::endl;
 }
 
+void send_file(SSL* ssl, const std::string& file_path)
+{
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open file: " << file_path << std::endl;
+        return;
+    }
+
+    // Get the file size
+    std::streamsize file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    // Send the file size first
+    uint32_t size_to_send = htonl(static_cast<uint32_t>(file_size)); // Convert to network byte order
+    if (SSL_write(ssl, &size_to_send, sizeof(size_to_send)) <= 0)
+    {
+        std::cerr << "Failed to send file size." << std::endl;
+        return;
+    }
+
+    // Send the file contents
+    std::cerr << "Sending file: " << file_path << " (Size: " << file_size << " bytes)" << std::endl;
+    char buffer[1024];
+    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0)
+    {
+        int bytes_to_send = static_cast<int>(file.gcount());
+        if (SSL_write(ssl, buffer, bytes_to_send) <= 0)
+        {
+            std::cerr << "Error sending file contents." << std::endl;
+            break;
+        }
+    }
+    file.close();
+    std::cerr << "File sent successfully: " << file_path << std::endl;
+}
+
+void receive_file(SSL* ssl, const std::string& output_path)
+{
+    // Open the output file
+    std::ofstream out_file(output_path, std::ios::binary);
+    if (!out_file.is_open())
+    {
+        std::cerr << "Failed to open file for writing: " << output_path << std::endl;
+        return;
+    }
+
+    // Step 1: Receive the file size
+    uint32_t file_size_net;
+    if (SSL_read(ssl, &file_size_net, sizeof(file_size_net)) <= 0)
+    {
+        std::cerr << "Error receiving file size." << std::endl;
+        out_file.close();
+        return;
+    }
+    uint32_t file_size = ntohl(file_size_net); // Convert from network byte order
+    std::cerr << "Receiving file of size: " << file_size << " bytes." << std::endl;
+
+    // Step 2: Receive the file contents
+    char buffer[1024];
+    std::streamsize bytes_received = 0;
+    while (bytes_received < file_size)
+    {
+        int bytes_to_read = std::min(static_cast<int>(sizeof(buffer)), static_cast<int>(file_size - bytes_received));
+        int bytes_read = SSL_read(ssl, buffer, bytes_to_read);
+        if (bytes_read <= 0)
+        {
+            std::cerr << "Error reading file data." << std::endl;
+            break;
+        }
+        out_file.write(buffer, bytes_read);
+        bytes_received += bytes_read;
+    }
+
+    out_file.close();
+    if (bytes_received == file_size)
+    {
+        std::cerr << "File received successfully: " << output_path << std::endl;
+    }
+    else
+    {
+        std::cerr << "File transfer incomplete." << std::endl;
+    }
+}
+
+void handle_client(SSL* ssl)
+{
+    // Step 1: Send a file to the client
+    send_file(ssl, "server_to_client.txt");
+
+    // Step 2: Receive a file from the client
+    receive_file(ssl, "received_from_client.txt");
+
+    // Step 3: Optionally send acknowledgment
+    const char* ack_message = "Server received the file successfully.";
+    SSL_write(ssl, ack_message, strlen(ack_message));
+    std::cerr << "Sent acknowledgment to client." << std::endl;
+}
 /**
  * @brief Sends the contents of a file to the connected client over SSL.
  *
@@ -880,11 +977,11 @@ void send_file_to_client(SSL* ssl, const std::string& file_path)
 
 int main(int argc, char** argv)
 {
-    if (argc != 6)
+    if (argc != 5)
     {
         std::cerr << "Usage: " << argv[0]
                   << " <TPM_Private_Key_Handle> <CertPath / TPM_NV_Cert_Index> "
-                     "<CA_Certificate_File/CA index> <Port> <File_To_Send> "
+                     "<CA_Certificate_File/CA index> <Port>"
                   << std::endl;
         return 1;
     }
@@ -893,7 +990,6 @@ int main(int argc, char** argv)
     std::string nvHandle = argv[2];
     std::string caCertPath = argv[3];
     int port = std::stoi(argv[4]);
-    std::string fileToSend = argv[5];
   
     OSSL_LIB_CTX *libctx = NULL;
 
@@ -965,7 +1061,7 @@ int main(int argc, char** argv)
             print_ssl_session_details(ssl);
 
             /* Send file to the client */
-            send_file_to_client(ssl, fileToSend);
+            handle_client(ssl);
 
             SSL_free(ssl);
             close(client_fd);
