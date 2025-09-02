@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# make sure to clean up the tpm handles 
+
+# Device 1 cleanup
+tpm2_evictcontrol -C p -c 0x81010001
+tpm2_nvundefine -C p 0x1500021
+tpm2_evictcontrol -C p -c 0x81010002
+tpm2_nvundefine -C p 0x1500022
+
+# Device 2 cleanup
+tpm2_evictcontrol -C p -c 0x81010003
+tpm2_nvundefine -C p 0x1500023
+tpm2_evictcontrol -C p -c 0x81010004
+tpm2_nvundefine -C p 0x1500024
+
+
 # Create separate directories for Device 1 and Device 2
 mkdir -p device1 device2
 
@@ -171,7 +186,7 @@ echo "Generating Device 1 Alias Certificate Signing Request (CSR)..."
 openssl req -provider tpm2 -provider default -new -key "handle:$ALIAS1_HANDLE" -out alias.csr -config alias_cert.conf
 
 echo "Signing Device 1 Alias Certificate with CA..."
-tpm2_nvread $CA1_NV_INDEX -C o | openssl x509 -inform der -outform pem | openssl x509 -provider tpm2 -provider default -req -in alias.csr -CA /dev/stdin -CAkey "handle:$CA1_HANDLE" -CAcreateserial -outform der -out alias_cert.der -days 30  -extensions v3_alias -extfile alias_cert.conf
+tpm2_nvread $CA1_NV_INDEX -C o | openssl x509 -inform der -outform pem | openssl x509 -provider tpm2 -provider default -req -in alias.csr -CA /dev/stdin -CAkey "handle:$CA1_HANDLE" -CAserial ./ca.srl -CAcreateserial -outform der -out alias_cert.der -days 30  -extensions v3_alias -extfile alias_cert.conf
 
 echo "Storing Device 1 Alias Certificate in TPM NV RAM at index $ALIAS1_CERT_NV_INDEX..."
 tpm2_nvdefine $ALIAS1_CERT_NV_INDEX -C o -s 2048 -a "ownerread|ownerwrite|authread|authwrite"
@@ -203,7 +218,7 @@ echo "Generating Device 2 Alias Certificate Signing Request (CSR)..."
 openssl req -provider tpm2 -provider default -new -key "handle:$ALIAS2_HANDLE" -out alias.csr -config alias_cert.conf
 
 echo "Signing Device 2 Alias Certificate with CA..."
-tpm2_nvread $CA2_NV_INDEX -C o | openssl x509 -inform der -outform pem | openssl x509 -provider tpm2 -provider default -req -in alias.csr -CA /dev/stdin -CAkey "handle:$CA2_HANDLE" -CAcreateserial -outform der -out alias_cert.der -days 30 -extensions v3_alias -extfile alias_cert.conf
+tpm2_nvread $CA2_NV_INDEX -C o | openssl x509 -inform der -outform pem | openssl x509 -provider tpm2 -provider default -req -in alias.csr -CA /dev/stdin -CAkey "handle:$CA2_HANDLE" -CAserial ./ca.srl -CAcreateserial -outform der -out alias_cert.der -days 30 -extensions v3_alias -extfile alias_cert.conf
 
 echo "Storing Device 2 Alias Certificate in TPM NV RAM at index $ALIAS2_CERT_NV_INDEX..."
 tpm2_nvdefine $ALIAS2_CERT_NV_INDEX -C o -s 2048 -a "ownerread|ownerwrite|authread|authwrite"
